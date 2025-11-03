@@ -104,6 +104,15 @@ def load_auth():
     return auth
 
 
+class StaleCheckpointError(RuntimeError):
+    """Raised when the stored paging checkpoint no longer exists on the server."""
+
+    def __init__(self, older_than: int | None, message: str) -> None:
+        super().__init__(message)
+        self.older_than = older_than
+        self.message = message
+
+
 def fetch_history(
     dev,
     total_limit: int,
@@ -115,6 +124,15 @@ def fetch_history(
     page = 0
     seen_ids: set[int] = set()
 
+    if older_than is not None:
+        try:
+            older_than = int(older_than)
+        except (TypeError, ValueError):
+            print(
+                f"  • Ignoring invalid older_than checkpoint value: {older_than!r}"
+            )
+            older_than = None
+
     while total_limit <= 0 or len(events) < total_limit:
         remaining = total_limit - len(events) if total_limit > 0 else HISTORY_PAGE_SIZE
         batch_limit = (
@@ -125,7 +143,17 @@ def fetch_history(
             kwargs["older_than"] = older_than
 
         page += 1
-        batch = list(dev.history(**kwargs))
+        try:
+            batch = list(dev.history(**kwargs))
+        except RingError as err:
+            error_text = str(err)
+            if "404" in error_text and older_than is not None:
+                print(
+                    f"  • Received 404 for older_than={older_than}; "
+                    "checkpoint may be stale. Aborting this fetch."
+                )
+                raise StaleCheckpointError(int(older_than), error_text) from err
+            raise
         print(
             f"  • Page {page}: requested {kwargs['limit']}, received {len(batch)} event(s)"
         )
@@ -246,7 +274,19 @@ def main() -> None:
             else:
                 print("  no resume checkpoint found; starting from latest events.")
 
-        history = fetch_history(dev, history_limit, start_older_than=resume_id)
+        try:
+            history = fetch_history(dev, history_limit, start_older_than=resume_id)
+        except StaleCheckpointError as checkpoint_err:
+            print(
+                f"  !!! Stale checkpoint detected for {dev.name}. "
+                f"API returned 404 while using older_than={checkpoint_err.older_than}."
+            )
+            print(
+                "  Clearing stored checkpoint so the next run starts from the latest events."
+            )
+            doorbot_states.pop(device_key, None)
+            state_dirty = True
+            continue
         print(f"  collected {len(history)} event(s)")
         if not history:
             continue
@@ -426,3 +466,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+class StaleCheckpointError(RuntimeError):
+    def __init__(self, older_than: int | None, message: str) -> None:
+        super().__init__(message)
+        self.older_than = older_than
+        self.message = message

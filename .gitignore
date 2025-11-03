@@ -1,0 +1,6 @@
+/ring_videos/
+ring_history_state.json
+*.ring_token.cache
+ring_token.cache
+__pycache__/
+*.py[cod]
